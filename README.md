@@ -30,6 +30,10 @@ multicall). Mainnet only.
      optional "custom NFT holdings URL" in Settings lets you wire another
      provider.
    - **Add manually** anything not detected.
+   - **USD prices** are read **on-chain** from Ekubo's Oracle (the `PriceFetcher`
+     contract), quoted against USDC via a TWAP — shown per token and as a
+     portfolio total. Tokens without an Ekubo oracle pool show no price. Prices
+     are informational only; transfer amounts are always token-denominated.
 
 > **Why a Worker?** Starkscan's Agent API returns `403` to any browser request
 > and its `mzk_live_*` keys are server-side credentials. A static site therefore

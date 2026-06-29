@@ -29,6 +29,7 @@ import {
   shortenAddress,
 } from "./lib/format";
 import type { Asset, Erc20Asset, NftAsset } from "./lib/types";
+import { fetchUsdPrices, priceKey } from "./lib/prices";
 import {
   buildCalls,
   buildOwnershipChallenge,
@@ -42,6 +43,15 @@ import {
 } from "./lib/migrate";
 
 const STRK = MAINNET_TOKENS.find((t) => t.symbol === "STRK")!;
+
+function formatUsd(n: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: n > 0 && n < 1 ? 6 : 2,
+  }).format(n);
+}
 
 type ProofState =
   | { status: "none" }
@@ -155,6 +165,7 @@ export default function App() {
   const [tokenNotice, setTokenNotice] = useState<string>();
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [amounts, setAmounts] = useState<Record<string, string>>({});
+  const [prices, setPrices] = useState<Map<string, number>>(new Map());
 
   // Manual add
   const [manualToken, setManualToken] = useState("");
@@ -196,6 +207,50 @@ export default function App() {
     return items;
   }, [allAssets, selected, amounts]);
 
+  function priceOf(a: Asset): number | undefined {
+    if (a.kind !== "erc20") return undefined;
+    return prices.get(priceKey(a.address));
+  }
+  function valueOf(a: Erc20Asset, amountRaw: bigint): number | undefined {
+    const p = prices.get(priceKey(a.address));
+    if (p === undefined) return undefined;
+    return (Number(amountRaw) / 10 ** a.decimals) * p;
+  }
+
+  const detectedValue = useMemo(
+    () =>
+      erc20s.reduce((sum, a) => sum + (valueOf(a, a.balance) ?? 0), 0),
+    [erc20s, prices],
+  );
+  const migratingValue = useMemo(
+    () =>
+      selectedItems.reduce(
+        (sum, it) =>
+          it.asset.kind === "erc20"
+            ? sum + (valueOf(it.asset, it.amount) ?? 0)
+            : sum,
+        0,
+      ),
+    [selectedItems, prices],
+  );
+
+  async function refreshPrices(tokens: Erc20Asset[]) {
+    if (tokens.length === 0) return;
+    try {
+      const m = await fetchUsdPrices(
+        makeProvider(),
+        tokens.map((t) => ({ address: t.address, decimals: t.decimals })),
+      );
+      setPrices((prev) => {
+        const next = new Map(prev);
+        for (const [k, v] of m) next.set(k, v);
+        return next;
+      });
+    } catch {
+      /* prices are best-effort */
+    }
+  }
+
   // ---- handlers ---------------------------------------------------------
 
   async function handleConnect() {
@@ -221,6 +276,7 @@ export default function App() {
     setNfts([]);
     setSelected({});
     setAmounts({});
+    setPrices(new Map());
     setProof({ status: "none" });
     setTxs([]);
     setMStatus("idle");
@@ -389,6 +445,7 @@ export default function App() {
       ]);
       setErc20s(tokenRes.assets);
       setTokenNotice(tokenRes.notice);
+      refreshPrices(tokenRes.assets);
       setNfts(nftRes.assets);
       if (nftRes.error) setNftNotice(nftRes.error);
       const sel: Record<string, boolean> = {};
@@ -421,6 +478,7 @@ export default function App() {
       setErc20s((prev) => [...prev, asset]);
       setSelected((s) => ({ ...s, [asset.id]: true }));
       setAmounts((m) => ({ ...m, [asset.id]: defaultAmountInput(asset) }));
+      refreshPrices([asset]);
       setManualToken("");
     } catch (e: any) {
       setManualError(e?.message ?? "Lookup failed.");
@@ -835,6 +893,7 @@ export default function App() {
               </button>
               <span className="muted">
                 {erc20s.length} token(s), {nfts.length} NFT(s) found
+                {detectedValue > 0 && <> · ≈ {formatUsd(detectedValue)} total</>}
               </span>
             </div>
 
@@ -857,6 +916,12 @@ export default function App() {
                         {a.isGasToken && <span className="tag">gas token</span>}
                         <div className="muted small">
                           Balance: {formatUnits(a.balance, a.decimals)}
+                          {priceOf(a) !== undefined && (
+                            <> · {formatUsd(priceOf(a)!)}/ea</>
+                          )}
+                          {valueOf(a, a.balance) !== undefined && (
+                            <> · ≈ {formatUsd(valueOf(a, a.balance)!)}</>
+                          )}
                         </div>
                       </div>
                       <div className="asset-amt">
@@ -1038,6 +1103,7 @@ export default function App() {
                 <tr>
                   <th>Asset</th>
                   <th>Amount</th>
+                  <th>Value</th>
                 </tr>
               </thead>
               <tbody>
@@ -1053,9 +1119,27 @@ export default function App() {
                         ? formatUnits(it.amount, it.asset.decimals)
                         : it.amount.toString()}
                     </td>
+                    <td className="muted">
+                      {it.asset.kind === "erc20" &&
+                      valueOf(it.asset, it.amount) !== undefined
+                        ? `≈ ${formatUsd(valueOf(it.asset, it.amount)!)}`
+                        : "—"}
+                    </td>
                   </tr>
                 ))}
               </tbody>
+              {migratingValue > 0 && (
+                <tfoot>
+                  <tr>
+                    <td colSpan={2}>
+                      <strong>Total (priced tokens)</strong>
+                    </td>
+                    <td>
+                      <strong>≈ {formatUsd(migratingValue)}</strong>
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
 
             <p className="muted small">
