@@ -14,11 +14,13 @@ import {
   type WalletConnection,
 } from "./lib/wallet";
 import {
+  isDeployed,
   lookupErc20,
   lookupNft,
   scanErc20,
   scanNfts,
 } from "./lib/discovery";
+import { MAINNET_TOKENS } from "./lib/tokens";
 import {
   addressesEqual,
   formatUnits,
@@ -31,6 +33,7 @@ import {
   buildCalls,
   buildOwnershipChallenge,
   chunk,
+  erc20TransferCall,
   estimateFee,
   executeCalls,
   randomNonce,
@@ -38,11 +41,20 @@ import {
   type MigrationItem,
 } from "./lib/migrate";
 
+const STRK = MAINNET_TOKENS.find((t) => t.symbol === "STRK")!;
+
 type ProofState =
   | { status: "none" }
   | { status: "verifying" }
   | { status: "verified"; signer: string }
   | { status: "failed"; message: string };
+
+type DeployFund =
+  | { status: "idle" }
+  | { status: "funding" }
+  | { status: "submitted"; hash: string }
+  | { status: "funded"; hash: string }
+  | { status: "error"; error: string };
 
 interface TxState {
   hash: string;
@@ -93,6 +105,9 @@ export default function App() {
     [recipientInput],
   );
   const [proof, setProof] = useState<ProofState>({ status: "none" });
+  const [receiverUndeployed, setReceiverUndeployed] = useState(false);
+  const [deployFund, setDeployFund] = useState<DeployFund>({ status: "idle" });
+  const [fundAmount, setFundAmount] = useState("2");
 
   // Assets
   const [scanning, setScanning] = useState(false);
@@ -178,6 +193,7 @@ export default function App() {
   async function handleProve() {
     if (!sender || !recipient) return;
     setProof({ status: "verifying" });
+    setReceiverUndeployed(false);
     try {
       const w = await connectWallet("alwaysAsk");
       if (!w) {
@@ -200,17 +216,73 @@ export default function App() {
       const ok = await verifyOwnership(w.account, typedData, signature, recipient);
       if (ok) {
         setProof({ status: "verified", signer: w.address });
+        return;
+      }
+      // Verification failed — distinguish "account not deployed yet" (common for
+      // a fresh wallet) from an actually-bad signature.
+      const deployed = await isDeployed(makeProvider(), recipient);
+      if (!deployed) {
+        setReceiverUndeployed(true);
+        setProof({
+          status: "failed",
+          message:
+            "This receiving account isn't deployed on-chain yet (normal for a brand-new wallet), so its signature can't be verified.",
+        });
       } else {
         setProof({
           status: "failed",
           message:
-            "Signature did not verify on-chain. The account may be undeployed, or the signature was rejected.",
+            "Signature did not verify on-chain. The wallet may have rejected it, or it isn't the owner of this address.",
         });
       }
     } catch (e: any) {
       setProof({
         status: "failed",
         message: e?.message ?? "Could not get a signature.",
+      });
+    }
+  }
+
+  // Fund the receiving account's deployment from the SENDING wallet. The deploy
+  // itself must be signed by the receiver's own wallet (only it holds the key),
+  // so this sends gas (STRK) and then guides the user to activate the receiver.
+  async function handleFundDeploy() {
+    if (!sender || !recipient) return;
+    setDeployFund({ status: "funding" });
+    try {
+      // Make sure the wallet's active account is the sender before paying.
+      const w = await connectWallet("alwaysAsk");
+      if (!w) {
+        setDeployFund({ status: "idle" });
+        return;
+      }
+      if (!addressesEqual(w.address, sender.address)) {
+        setDeployFund({
+          status: "error",
+          error: `Select the sending account ${shortenAddress(sender.address)} in your wallet, then try again (currently active: ${shortenAddress(w.address)}).`,
+        });
+        return;
+      }
+      let amount: bigint;
+      try {
+        amount = parseUnits(fundAmount || "0", STRK.decimals);
+      } catch {
+        setDeployFund({ status: "error", error: "Invalid STRK amount." });
+        return;
+      }
+      if (amount <= 0n) {
+        setDeployFund({ status: "error", error: "Enter an amount greater than 0." });
+        return;
+      }
+      const call = erc20TransferCall(STRK.address, recipient, amount);
+      const res = await w.account.execute(call);
+      setDeployFund({ status: "submitted", hash: res.transaction_hash });
+      await makeProvider().waitForTransaction(res.transaction_hash);
+      setDeployFund({ status: "funded", hash: res.transaction_hash });
+    } catch (e: any) {
+      setDeployFund({
+        status: "error",
+        error: e?.message ?? "Funding transaction failed or was rejected.",
       });
     }
   }
@@ -463,6 +535,8 @@ export default function App() {
                 onChange={(e) => {
                   setRecipientInput(e.target.value);
                   setProof({ status: "none" });
+                  setReceiverUndeployed(false);
+                  setDeployFund({ status: "idle" });
                 }}
                 placeholder="0x…"
                 spellCheck={false}
@@ -507,6 +581,70 @@ export default function App() {
               </button>
               {proof.status === "failed" && (
                 <p className="error">{proof.message}</p>
+              )}
+
+              {receiverUndeployed && (
+                <div className="deploy-box">
+                  <strong>Activate the receiving account</strong>
+                  <p className="muted">
+                    You can <em>skip this and migrate anyway</em> — transfers to an
+                    undeployed address succeed, and the STRK/ETH you send will let
+                    you deploy the wallet afterward. Or fund its deployment now from
+                    the <strong>sending</strong> wallet:
+                  </p>
+                  <ol className="muted small">
+                    <li>
+                      Send a little STRK from the sending wallet (covers the deploy
+                      fee).
+                    </li>
+                    <li>
+                      Open the <strong>receiving</strong> wallet and make any
+                      transaction — it deploys itself automatically, paying with that
+                      STRK. (Only the receiver’s wallet can sign its own deployment.)
+                    </li>
+                    <li>Come back and click “Connect receiver &amp; sign” again.</li>
+                  </ol>
+                  <div className="inline">
+                    <input
+                      className="short"
+                      value={fundAmount}
+                      onChange={(e) => setFundAmount(e.target.value)}
+                      spellCheck={false}
+                    />
+                    <span className="muted small" style={{ alignSelf: "center" }}>
+                      STRK
+                    </span>
+                    <button
+                      className="btn ghost"
+                      onClick={handleFundDeploy}
+                      disabled={deployFund.status === "funding"}
+                    >
+                      {deployFund.status === "funding"
+                        ? "Sending…"
+                        : "Fund deployment from sending wallet"}
+                    </button>
+                  </div>
+                  {(deployFund.status === "submitted" ||
+                    deployFund.status === "funded") && (
+                    <p className="muted small">
+                      {deployFund.status === "funded"
+                        ? "✓ Gas sent. "
+                        : "Sent, confirming… "}
+                      <a
+                        href={EXPLORER_TX(deployFund.hash)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {shortenAddress(deployFund.hash, 10, 8)}
+                      </a>
+                      {deployFund.status === "funded" &&
+                        " — now activate the receiving wallet, then verify again."}
+                    </p>
+                  )}
+                  {deployFund.status === "error" && (
+                    <p className="error">{deployFund.error}</p>
+                  )}
+                </div>
               )}
             </div>
 

@@ -17,6 +17,19 @@ function isGasTokenAddress(addr: string): boolean {
   }
 }
 
+/** Whether a contract (account) is deployed on-chain at `address`. */
+export async function isDeployed(
+  provider: RpcProvider,
+  address: string,
+): Promise<boolean> {
+  try {
+    const h = await provider.getClassHashAt(address);
+    return !!h && BigInt(h) !== 0n;
+  } catch {
+    return false;
+  }
+}
+
 /** Run async `fn` over `items` with a bounded concurrency. */
 async function mapLimit<T, R>(
   items: T[],

@@ -15,15 +15,24 @@ export interface MigrationItem {
   amount: bigint;
 }
 
+/** Build an ERC-20 `transfer(to, amount)` call. */
+export function erc20TransferCall(
+  token: string,
+  to: string,
+  amount: bigint,
+): Call {
+  return {
+    contractAddress: token,
+    entrypoint: "transfer",
+    calldata: CallData.compile([to, cairo.uint256(amount)]),
+  };
+}
+
 /** Build the single transfer Call for one migration item. */
 export function buildCall(item: MigrationItem, from: string, to: string): Call {
   const a = item.asset;
   if (a.kind === "erc20") {
-    return {
-      contractAddress: a.address,
-      entrypoint: "transfer",
-      calldata: CallData.compile([to, cairo.uint256(item.amount)]),
-    };
+    return erc20TransferCall(a.address, to, item.amount);
   }
   if (a.kind === "erc721") {
     return {
