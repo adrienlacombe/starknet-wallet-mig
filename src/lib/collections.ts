@@ -38,4 +38,14 @@ export const MAINNET_NFT_COLLECTIONS: NftCollectionInfo[] = [
     address: "0x058e75fe127b94923d6efe51c56bca98bd82cd43c7fd2ea562019a3101c245f9",
     name: "Collection 0x058e…245f9",
   },
+  {
+    // Enumerable — token IDs auto-resolve via tokenOfOwnerByIndex.
+    address: "0x02acee8c430f62333cf0e0e7a94b2347b5513b4c25f699461dd8d7b23c072478",
+    name: "EveraiDuo",
+  },
+  {
+    // Enumerable — token IDs auto-resolve via tokenOfOwnerByIndex.
+    address: "0x058949fa2955b10b3a82521934e8b0505dc0b7ba929c3049622ae91d2c52e194",
+    name: "Dungeon Ducks",
+  },
 ];
