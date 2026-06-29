@@ -48,4 +48,10 @@ export const MAINNET_NFT_COLLECTIONS: NftCollectionInfo[] = [
     address: "0x058949fa2955b10b3a82521934e8b0505dc0b7ba929c3049622ae91d2c52e194",
     name: "Dungeon Ducks",
   },
+  {
+    // Enumerable. Distinct from the briq-based "Ducks Everywhere" (0x02c3…) —
+    // this one's symbol is DUCKS.
+    address: "0x04fa864a706e3403fd17ac8df307f22eafa21b778b73353abf69a622e47a2003",
+    name: "Ducks Everywhere (DUCKS)",
+  },
 ];
