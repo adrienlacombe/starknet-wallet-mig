@@ -77,24 +77,103 @@ export interface Erc20ScanResult {
   notice?: string;
 }
 
+/** A token to check: address plus whatever metadata we already know. */
+interface Candidate {
+  address: string;
+  symbol?: string | null;
+  name?: string | null;
+  decimals?: number | null;
+  isGasToken?: boolean;
+}
+
+function numKey(addr: string): string {
+  try {
+    return BigInt(addr).toString();
+  } catch {
+    return addr.toLowerCase();
+  }
+}
+
+/** Read `symbol`/`decimals` on-chain for tokens whose metadata is unknown. */
+async function enrichMeta(
+  provider: RpcProvider,
+  addr: string,
+): Promise<{ symbol?: string; decimals?: number }> {
+  const [symRes, decRes] = await Promise.all([
+    provider
+      .callContract({ contractAddress: addr, entrypoint: "symbol", calldata: [] })
+      .catch(() => [] as string[]),
+    provider
+      .callContract({ contractAddress: addr, entrypoint: "decimals", calldata: [] })
+      .catch(() => [] as string[]),
+  ]);
+  return {
+    symbol: decodeCairoString(symRes) || undefined,
+    decimals: decRes.length ? Number(BigInt(decRes[0])) : undefined,
+  };
+}
+
 /**
- * Discover ERC-20 holdings. With a Starkscan key set, uses the `token-holdings`
- * endpoint (detects ALL fungible tokens). Without a key, falls back to checking
- * the built-in token list over RPC.
+ * For each candidate, read the LIVE on-chain balance (never trust an indexer
+ * snapshot for amounts) and fill in any missing symbol/decimals. Keeps only
+ * tokens with a positive balance.
+ */
+async function scanBalances(
+  provider: RpcProvider,
+  owner: string,
+  candidates: Candidate[],
+): Promise<Erc20Asset[]> {
+  const results = await mapLimit(candidates, 8, async (c) => {
+    try {
+      const balance = await readBalance(provider, c.address, owner);
+      if (balance <= 0n) return null;
+      let symbol = c.symbol ?? undefined;
+      let decimals = c.decimals ?? undefined;
+      const name = c.name ?? undefined;
+      if (symbol == null || decimals == null) {
+        const meta = await enrichMeta(provider, c.address);
+        symbol = symbol ?? meta.symbol;
+        decimals = decimals ?? meta.decimals;
+      }
+      const addr = normalizeAddress(c.address) ?? c.address;
+      const asset: Erc20Asset = {
+        kind: "erc20",
+        id: addr,
+        address: addr,
+        symbol: symbol || "TOKEN",
+        name: name || symbol || "Token",
+        decimals: decimals ?? 18,
+        balance,
+        isGasToken: c.isGasToken ?? isGasTokenAddress(addr),
+        source: "list",
+      };
+      return asset;
+    } catch {
+      return null;
+    }
+  });
+  return results.filter((r): r is Erc20Asset => r !== null);
+}
+
+/**
+ * Discover ERC-20 holdings. With the Worker proxy configured, it lists every
+ * token the address holds (via Starkscan) and re-reads live balances on-chain.
+ * Without a proxy, it checks the built-in token list over RPC (keyless).
  */
 export async function scanErc20(
   provider: RpcProvider,
   owner: string,
 ): Promise<Erc20ScanResult> {
   const cfg = getIndexerConfig();
-  if (cfg.key) {
+  if (cfg.proxyUrl) {
     try {
-      return await scanErc20ViaIndexer(owner);
+      const assets = await scanErc20ViaProxy(provider, owner, cfg.proxyUrl);
+      return { assets };
     } catch (e: any) {
       const fallback = await scanErc20ViaRpc(provider, owner);
       return {
         assets: fallback,
-        notice: `Starkscan token-holdings failed (${e?.message ?? "error"}). Showed built-in token list instead — add anything missing manually.`,
+        notice: `Token-discovery proxy failed (${e?.message ?? "error"}). Showed the built-in token list instead — add anything missing manually.`,
       };
     }
   }
@@ -102,101 +181,65 @@ export async function scanErc20(
   return {
     assets,
     notice:
-      "No Starkscan API key set — checked the built-in token list only. Add a key in Settings to auto-detect every token, or add tokens manually.",
+      "No token-discovery proxy configured — checked the built-in token list only. Deploy the Cloudflare worker and set its URL in Settings to auto-detect every token, or add tokens manually.",
   };
 }
 
-/** Curated-list + RPC balance scan (keyless). */
+/** Curated-list + RPC balance scan (keyless fallback). */
 async function scanErc20ViaRpc(
   provider: RpcProvider,
   owner: string,
 ): Promise<Erc20Asset[]> {
-  const results = await mapLimit(MAINNET_TOKENS, 8, async (t) => {
-    try {
-      const balance = await readBalance(provider, t.address, owner);
-      if (balance > 0n) {
-        const addr = normalizeAddress(t.address) ?? t.address;
-        const asset: Erc20Asset = {
-          kind: "erc20",
-          id: addr,
-          address: addr,
-          symbol: t.symbol,
-          name: t.name,
-          decimals: t.decimals,
-          balance,
-          isGasToken: t.isGasToken,
-          source: "list",
-        };
-        return asset;
-      }
-    } catch {
-      /* token not deployed / non-standard — skip */
-    }
-    return null;
-  });
-  return results.filter((r): r is Erc20Asset => r !== null);
+  return scanBalances(
+    provider,
+    owner,
+    MAINNET_TOKENS.map((t) => ({ ...t })),
+  );
 }
 
-/** Starkscan Agent API `/v1/{chain}/address/{address}/token-holdings`. */
-async function scanErc20ViaIndexer(owner: string): Promise<Erc20ScanResult> {
-  const cfg = getIndexerConfig();
-  const headers: Record<string, string> = {
-    accept: "application/json",
-    [cfg.keyHeader]: cfg.key,
-  };
-  const base = cfg.base.replace(/\/+$/, "");
-  const out: Erc20Asset[] = [];
-  let cursor: string | null = null;
-  let guard = 0;
-  let incomplete = false;
-  do {
-    guard++;
-    const url =
-      `${base}/v1/${cfg.chain}/address/${owner}/token-holdings` +
-      (cursor ? `?cursor=${encodeURIComponent(cursor)}` : "");
-    const r: Response = await fetch(url, { headers });
-    if (!r.ok) {
-      const body = await r.text().catch(() => "");
-      throw new Error(`HTTP ${r.status} ${body.slice(0, 140)}`);
-    }
-    const j: any = await r.json();
-    const holdings: any[] = j.holdings ?? j.data ?? [];
-    for (const h of holdings) {
-      const rawAddr = h.normalizedTokenAddress ?? h.tokenAddress ?? h.token;
-      if (!rawAddr) continue;
-      let balance: bigint;
-      try {
-        balance = BigInt(h.balance ?? "0");
-      } catch {
-        continue;
-      }
-      if (balance <= 0n) continue;
-      const addr = normalizeAddress(rawAddr) ?? rawAddr;
-      const decimals = Number(h.decimals ?? 18);
-      out.push({
-        kind: "erc20",
-        id: addr,
-        address: addr,
-        symbol: h.symbol || "TOKEN",
-        name: h.name || h.symbol || "Token",
-        decimals: Number.isFinite(decimals) ? decimals : 18,
-        balance,
-        isGasToken: isGasTokenAddress(addr),
-        source: "list",
-      });
-    }
-    cursor = j.nextCursor ?? j.next_cursor ?? null;
-    if (j.truncated === true || j.completeness?.reasonCode === "truncated") {
-      incomplete = true;
-    }
-  } while (cursor && guard < 30);
-
-  return {
-    assets: out,
-    notice: incomplete
-      ? "Starkscan reported the holdings list may be incomplete — double-check, and add anything missing manually."
-      : undefined,
-  };
+/**
+ * Token discovery via the Worker proxy. The proxy returns Starkscan's
+ * `token-holdings` items; we use them as the candidate set, merge in curated
+ * metadata, then read live balances.
+ */
+async function scanErc20ViaProxy(
+  provider: RpcProvider,
+  owner: string,
+  proxyUrl: string,
+): Promise<Erc20Asset[]> {
+  const base = proxyUrl.replace(/\/+$/, "");
+  const r = await fetch(`${base}/token-holdings?address=${owner}`, {
+    headers: { accept: "application/json" },
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`HTTP ${r.status} ${body.slice(0, 140)}`);
+  }
+  const j: any = await r.json();
+  const items: any[] = j.items ?? j.holdings ?? j.data ?? [];
+  const curated = new Map(
+    MAINNET_TOKENS.map((t) => [numKey(t.address), t] as const),
+  );
+  const seen = new Set<string>();
+  const candidates: Candidate[] = [];
+  for (const it of items) {
+    const raw =
+      it.normalizedTokenAddress ?? it.tokenAddress ?? it.token ?? it.address;
+    if (!raw) continue;
+    const addr = normalizeAddress(raw) ?? raw;
+    const key = numKey(addr);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const cur = curated.get(key);
+    candidates.push({
+      address: addr,
+      symbol: it.symbol ?? cur?.symbol ?? null,
+      name: it.name ?? cur?.name ?? null,
+      decimals: it.decimals ?? cur?.decimals ?? null,
+      isGasToken: cur?.isGasToken ?? isGasTokenAddress(addr),
+    });
+  }
+  return scanBalances(provider, owner, candidates);
 }
 
 /** Manual ERC-20 lookup by contract address. Reads symbol/decimals/balance on-chain. */
@@ -319,7 +362,6 @@ export async function scanNfts(owner: string): Promise<NftScanResult> {
   }
   const url = cfg.nftUrlTemplate.replaceAll("{address}", owner);
   const headers: Record<string, string> = { accept: "application/json" };
-  if (cfg.key) headers[cfg.keyHeader] = cfg.key;
   const out: NftAsset[] = [];
   try {
     const r = await fetch(url, { headers });

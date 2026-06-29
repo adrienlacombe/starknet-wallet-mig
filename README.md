@@ -19,16 +19,23 @@ multicall). Mainnet only.
    that is verified on-chain (`is_valid_signature`). Skip it for cold/hardware
    wallets you can't connect in the browser.
 3. **Pick assets to migrate**:
-   - **ERC-20** — with a Starkscan API key (entered at runtime, stored only in
-     your browser), all fungible holdings are auto-detected via Starkscan's
-     Agent API (`GET /v1/SN_MAIN/address/{address}/token-holdings`). Without a
-     key, the app falls back to checking a built-in token list
-     (`src/lib/tokens.ts`) over public RPC — no key needed.
-   - **NFTs** — Starkscan's Agent API has **no NFT-by-owner endpoint**, so NFTs
-     are **added manually** (contract + token ID, verified on-chain via
-     `ownerOf`). An optional "custom NFT holdings URL" in Settings lets you wire
-     a different provider if you have one.
+   - **ERC-20** — with the token-discovery **Worker proxy** configured (see
+     `/worker`), all fungible holdings are auto-detected: the Worker calls
+     Starkscan server-side (holding the API key) and the app re-reads **live
+     on-chain balances** for each token (so a stale indexer snapshot can never
+     inflate a transfer). Without a proxy, the app falls back to a built-in
+     token list (`src/lib/tokens.ts`) over public RPC — no key, no Worker.
+   - **NFTs** — Starkscan has **no NFT-by-owner endpoint**, so NFTs are **added
+     manually** (contract + token ID, verified on-chain via `ownerOf`). An
+     optional "custom NFT holdings URL" in Settings lets you wire another
+     provider.
    - **Add manually** anything not detected.
+
+> **Why a Worker?** Starkscan's Agent API returns `403` to any browser request
+> and its `mzk_live_*` keys are server-side credentials. A static site therefore
+> can't call it directly. The tiny Cloudflare Worker in `/worker` holds the key
+> as a secret and proxies the call. See `worker/README.md` to deploy it, then set
+> repo variable `PROXY_URL` (or paste the URL in Settings).
 4. **Review & migrate** — all selected transfers are batched into one multicall
    (chunked into several transactions if there are many), with a fee estimate.
    For ETH/STRK the default keeps a small gas buffer so you can still pay fees.
@@ -58,17 +65,17 @@ npm run preview  # serve the production build
 
 - **RPC URL** — defaults to a public, CORS-open mainnet endpoint. Override with
   your own provider if you hit rate limits.
-- **Starkscan Agent API** — base URL (default `https://api.starkscan.co`), chain
-  (`SN_MAIN`), API key, and key header name (default `X-Starkscan-Api-Key`).
-  Used for ERC-20 `token-holdings` auto-detection.
+- **Token-discovery proxy URL** — the deployed Cloudflare Worker (`/worker`).
+  Holds the Starkscan key server-side; the browser never sees it. Blank → the
+  built-in token list is used instead.
 - **Custom NFT holdings URL** (optional) — Starkscan has no NFT-by-owner
   endpoint; supply another provider's URL with `{address}` as a placeholder if
   you have one.
 
 > Note: Starknet has no on-chain "list my assets" call, so full token detection
-> uses an indexer (Starkscan) + key. NFT enumeration isn't offered by Starkscan
-> today, so NFTs are added manually (verified on-chain). ERC-20 detection still
-> works without a key via the built-in list.
+> uses an indexer (Starkscan) via the Worker proxy. NFT enumeration isn't offered
+> by Starkscan, so NFTs are added manually (verified on-chain). ERC-20 detection
+> still works with no Worker via the built-in list.
 
 ## Deploy to GitHub Pages
 

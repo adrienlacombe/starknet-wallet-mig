@@ -983,10 +983,10 @@ export default function App() {
 
             {!scanning && erc20s.length === 0 && nfts.length === 0 && (
               <p className="muted">
-                Nothing detected yet. Set a Starkscan API key in Settings to
-                auto-detect all tokens (without one, only a built-in token list
-                is checked). NFTs aren’t auto-detected via Starkscan — add them
-                with “Add an asset manually”.
+                Nothing detected yet. Configure the token-discovery proxy URL in
+                Settings to auto-detect all tokens (without it, only a built-in
+                token list is checked). NFTs aren’t auto-detected — add them with
+                “Add an asset manually”.
               </p>
             )}
 

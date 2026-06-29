@@ -1,35 +1,18 @@
 import { useState } from "react";
-import {
-  getIndexerConfig,
-  setIndexerConfig,
-} from "../lib/indexerConfig";
+import { getIndexerConfig, setIndexerConfig } from "../lib/indexerConfig";
 import { getRpcUrl, setRpcUrl } from "../lib/provider";
-import {
-  DEFAULT_INDEXER_BASE,
-  DEFAULT_INDEXER_CHAIN,
-  DEFAULT_INDEXER_KEY_HEADER,
-  DEFAULT_RPC_URL,
-} from "../config";
+import { DEFAULT_RPC_URL } from "../config";
 
 export function Settings({ onClose }: { onClose: () => void }) {
   const idx = getIndexerConfig();
   const [rpc, setRpc] = useState(getRpcUrl());
-  const [base, setBase] = useState(idx.base);
-  const [chain, setChain] = useState(idx.chain);
-  const [key, setKey] = useState(idx.key);
-  const [header, setHeader] = useState(idx.keyHeader);
+  const [proxy, setProxy] = useState(idx.proxyUrl);
   const [nftUrl, setNftUrl] = useState(idx.nftUrlTemplate);
   const [saved, setSaved] = useState(false);
 
   function save() {
     setRpcUrl(rpc || DEFAULT_RPC_URL);
-    setIndexerConfig({
-      base: base || DEFAULT_INDEXER_BASE,
-      chain: chain || DEFAULT_INDEXER_CHAIN,
-      key,
-      keyHeader: header || DEFAULT_INDEXER_KEY_HEADER,
-      nftUrlTemplate: nftUrl,
-    });
+    setIndexerConfig({ proxyUrl: proxy, nftUrlTemplate: nftUrl });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   }
@@ -51,36 +34,21 @@ export function Settings({ onClose }: { onClose: () => void }) {
         </label>
 
         <hr />
-        <h3>Starkscan Agent API (token discovery)</h3>
+        <h3>Token-discovery proxy (Cloudflare Worker)</h3>
         <p className="muted">
-          A key auto-detects <strong>all</strong> ERC-20 holdings via Starkscan’s{" "}
-          <code>token-holdings</code> endpoint. It is stored only in this browser
-          (localStorage) and sent directly to Starkscan — never committed
-          anywhere. Get a key at starkscan.co. NFTs are not covered by this API
-          (add them manually).
+          Base URL of the Worker in <code>/worker</code>. It holds the Starkscan
+          API key server-side and lists every token the wallet holds — no key
+          ever lives in the browser. Leave blank to fall back to the built-in
+          token list. Deploy steps are in <code>worker/README.md</code>.
         </p>
-
         <label className="field">
-          <span>API base URL</span>
-          <input value={base} onChange={(e) => setBase(e.target.value)} spellCheck={false} />
-        </label>
-        <label className="field">
-          <span>Chain</span>
-          <input value={chain} onChange={(e) => setChain(e.target.value)} spellCheck={false} />
-        </label>
-        <label className="field">
-          <span>API key</span>
+          <span>Proxy URL</span>
           <input
-            type="password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="paste your Starkscan API key"
+            value={proxy}
+            onChange={(e) => setProxy(e.target.value)}
+            placeholder="https://snf-wallet-proxy.your-subdomain.workers.dev"
             spellCheck={false}
           />
-        </label>
-        <label className="field">
-          <span>Key header name</span>
-          <input value={header} onChange={(e) => setHeader(e.target.value)} spellCheck={false} />
         </label>
 
         <hr />
@@ -88,8 +56,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <p className="muted">
           Starkscan can’t list NFTs by owner. If you have another provider, put
           its URL here using <code>{"{address}"}</code> as a placeholder. Leave
-          blank to add NFTs manually. The API key above is sent as the same
-          header.
+          blank to add NFTs manually (each is verified on-chain).
         </p>
         <label className="field">
           <span>NFT holdings URL template</span>

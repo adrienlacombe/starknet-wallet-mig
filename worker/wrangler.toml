@@ -1,0 +1,11 @@
+name = "snf-wallet-proxy"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+# Origins allowed to call this worker from a browser (comma-separated).
+# Override here or leave to the built-in default (github.io + localhost).
+[vars]
+ALLOWED_ORIGINS = "https://starknet-innovation.github.io,http://localhost:5173"
+
+# The Starkscan API key is a SECRET — never put it here. Set it with:
+#   npx wrangler secret put STARKSCAN_API_KEY
