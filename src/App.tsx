@@ -19,6 +19,7 @@ import {
   lookupNft,
   scanErc20,
   scanNfts,
+  type HeldCollection,
 } from "./lib/discovery";
 import { MAINNET_TOKENS } from "./lib/tokens";
 import {
@@ -163,6 +164,8 @@ export default function App() {
   const [nfts, setNfts] = useState<NftAsset[]>([]);
   const [nftNotice, setNftNotice] = useState<string>();
   const [tokenNotice, setTokenNotice] = useState<string>();
+  const [heldCollections, setHeldCollections] = useState<HeldCollection[]>([]);
+  const [manualOpen, setManualOpen] = useState(false);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [amounts, setAmounts] = useState<Record<string, string>>({});
   const [prices, setPrices] = useState<Map<string, number>>(new Map());
@@ -277,6 +280,7 @@ export default function App() {
     setSelected({});
     setAmounts({});
     setPrices(new Map());
+    setHeldCollections([]);
     setProof({ status: "none" });
     setTxs([]);
     setMStatus("idle");
@@ -441,13 +445,14 @@ export default function App() {
       const provider = makeProvider();
       const [tokenRes, nftRes] = await Promise.all([
         scanErc20(provider, sender.address),
-        scanNfts(sender.address),
+        scanNfts(provider, sender.address),
       ]);
       setErc20s(tokenRes.assets);
       setTokenNotice(tokenRes.notice);
       refreshPrices(tokenRes.assets);
       setNfts(nftRes.assets);
-      if (nftRes.error) setNftNotice(nftRes.error);
+      setHeldCollections(nftRes.manualNeeded ?? []);
+      setNftNotice(nftRes.error ?? nftRes.notice);
       const sel: Record<string, boolean> = {};
       const amt: Record<string, string> = {};
       for (const a of [...tokenRes.assets, ...nftRes.assets]) {
@@ -994,9 +999,50 @@ export default function App() {
               </>
             )}
 
+            {heldCollections.length > 0 && (
+              <>
+                <h3>Detected NFT holdings — add token IDs</h3>
+                <div className="asset-list">
+                  {heldCollections.map((c) => (
+                    <div className="asset-row" key={c.address}>
+                      <div className="asset-main">
+                        <strong>{c.name}</strong>
+                        <div className="muted small">
+                          Holds {c.balance}
+                          {c.truncated ? "+" : ""} · not enumerable on-chain ·{" "}
+                          <a
+                            href={EXPLORER_CONTRACT(c.address)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {shortenAddress(c.address)}
+                          </a>
+                        </div>
+                      </div>
+                      <button
+                        className="btn ghost"
+                        onClick={() => {
+                          setManualNftAddr(c.address);
+                          setManualOpen(true);
+                        }}
+                      >
+                        Add token ID
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
             {nftNotice && <p className="notice">{nftNotice}</p>}
 
-            <details className="manual">
+            <details
+              className="manual"
+              open={manualOpen}
+              onToggle={(e) =>
+                setManualOpen((e.target as HTMLDetailsElement).open)
+              }
+            >
               <summary>Add an asset manually</summary>
               <div className="manual-grid">
                 <div className="field">

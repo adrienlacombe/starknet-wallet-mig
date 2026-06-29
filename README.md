@@ -25,11 +25,15 @@ multicall). Mainnet only.
      on-chain balances** for each token (so a stale indexer snapshot can never
      inflate a transfer). Without a proxy, the app falls back to a built-in
      token list (`src/lib/tokens.ts`) over public RPC — no key, no Worker.
-   - **NFTs** — Starkscan has **no NFT-by-owner endpoint**, so NFTs are **added
-     manually** (contract + token ID, verified on-chain via `ownerOf`). An
-     optional "custom NFT holdings URL" in Settings lets you wire another
-     provider.
-   - **Add manually** anything not detected.
+   - **NFTs** — detected via **plain RPC** over a curated collection list
+     (`src/lib/collections.ts`): `balanceOf(owner)` per collection (cheap,
+     parallel). For ERC-721 **Enumerable** collections it reads the exact token
+     IDs via `tokenOfOwnerByIndex`; for non-enumerable ones (the common case on
+     Starknet) it reports the holding and offers a one-click **manual token-ID**
+     prompt (collection pre-filled, verified on-chain via `ownerOf`). No indexer
+     needed. An optional "custom NFT holdings URL" in Settings can use an
+     external indexer instead.
+   - **Add manually** anything not detected (by contract + token ID).
    - **USD prices** are read **on-chain** from Ekubo's Oracle (the `PriceFetcher`
      contract), quoted against USDC via a TWAP — shown per token and as a
      portfolio total. Tokens without an Ekubo oracle pool show no price. Prices

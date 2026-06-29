@@ -1,5 +1,6 @@
 import { RpcProvider, cairo } from "starknet";
 import { MAINNET_TOKENS } from "./tokens";
+import { MAINNET_NFT_COLLECTIONS } from "./collections";
 import type { Erc20Asset, NftAsset } from "./types";
 import { decodeCairoString } from "./decode";
 import { addressesEqual, normalizeAddress, u256FromFelts } from "./format";
@@ -341,25 +342,127 @@ export async function lookupNft(
   };
 }
 
-export interface NftScanResult {
-  assets: NftAsset[];
-  error?: string;
+export interface HeldCollection {
+  address: string;
+  name: string;
+  balance: number;
+  /** true when balance exceeded the enumerate cap and not all IDs were read */
+  truncated?: boolean;
 }
 
+export interface NftScanResult {
+  assets: NftAsset[];
+  /** Held collections that aren't Enumerable — token IDs must be added manually. */
+  manualNeeded?: HeldCollection[];
+  error?: string;
+  notice?: string;
+}
+
+/** Max token IDs to enumerate per collection (avoids huge loops). */
+const ENUMERATE_CAP = 50n;
+
 /**
- * NFT auto-discovery. Starkscan's Agent API has no NFT-by-owner endpoint, so
- * this only runs when a custom `nftUrlTemplate` (with `{address}`) is set in
- * Settings; otherwise it returns a notice and you add NFTs manually.
+ * NFT discovery. Default = plain RPC over the curated collection list
+ * (`balanceOf` + Enumerable token IDs). If a custom NFT holdings URL is set in
+ * Settings, that indexer is used instead.
  */
-export async function scanNfts(owner: string): Promise<NftScanResult> {
+export async function scanNfts(
+  provider: RpcProvider,
+  owner: string,
+): Promise<NftScanResult> {
   const cfg = getIndexerConfig();
-  if (!cfg.nftUrlTemplate) {
-    return {
-      assets: [],
-      error:
-        "Starkscan's API doesn't list NFTs by owner, so NFTs aren't auto-detected. Add them manually below (each is verified on-chain), or set a custom NFT holdings URL in Settings.",
-    };
+  if (cfg.nftUrlTemplate) return scanNftsViaCustomUrl(owner);
+  return scanNftsViaRpc(provider, owner);
+}
+
+function readU256(res: string[]): bigint {
+  return u256FromFelts(res[0] ?? "0", res[1] ?? "0");
+}
+
+/** Read an owner's token IDs in an Enumerable collection; null if not enumerable. */
+async function tryEnumerate(
+  provider: RpcProvider,
+  contract: string,
+  owner: string,
+  balance: bigint,
+): Promise<{ ids: bigint[]; truncated: boolean } | null> {
+  const cap = balance > ENUMERATE_CAP ? ENUMERATE_CAP : balance;
+  for (const entrypoint of ["token_of_owner_by_index", "tokenOfOwnerByIndex"]) {
+    const ids: bigint[] = [];
+    let ok = true;
+    for (let i = 0n; i < cap; i++) {
+      const idx = cairo.uint256(i);
+      try {
+        const res = await provider.callContract({
+          contractAddress: contract,
+          entrypoint,
+          calldata: [owner, idx.low.toString(), idx.high.toString()],
+        });
+        ids.push(readU256(res));
+      } catch {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return { ids, truncated: balance > ENUMERATE_CAP };
   }
+  return null;
+}
+
+/** Plain-RPC NFT scan: balanceOf per curated collection, Enumerable for IDs. */
+export async function scanNftsViaRpc(
+  provider: RpcProvider,
+  owner: string,
+): Promise<NftScanResult> {
+  const assets: NftAsset[] = [];
+  const manualNeeded: HeldCollection[] = [];
+  await mapLimit(MAINNET_NFT_COLLECTIONS, 6, async (col) => {
+    let balance: bigint;
+    try {
+      // readBalance tries both balanceOf (camelCase) and balance_of (snake).
+      balance = await readBalance(provider, col.address, owner);
+    } catch {
+      return; // not a standard ERC-721 / no balance_of
+    }
+    if (balance <= 0n) return;
+    const addr = normalizeAddress(col.address) ?? col.address;
+    const enumerated = await tryEnumerate(provider, addr, owner, balance);
+    if (enumerated && enumerated.ids.length > 0) {
+      for (const tokenId of enumerated.ids) {
+        assets.push({
+          kind: "erc721",
+          id: `${addr}:${tokenId.toString()}`,
+          address: addr,
+          tokenId,
+          balance: 1n,
+          collectionName: col.name,
+          source: "indexer",
+        });
+      }
+      if (enumerated.truncated) {
+        manualNeeded.push({
+          address: addr,
+          name: col.name,
+          balance: Number(balance),
+          truncated: true,
+        });
+      }
+    } else {
+      manualNeeded.push({
+        address: addr,
+        name: col.name,
+        balance: Number(balance),
+      });
+    }
+  });
+  const notice = manualNeeded.some((m) => !m.truncated)
+    ? "Some collections you hold aren't enumerable on-chain — add their token IDs manually below (collection pre-filled)."
+    : undefined;
+  return { assets, manualNeeded, notice };
+}
+
+async function scanNftsViaCustomUrl(owner: string): Promise<NftScanResult> {
+  const cfg = getIndexerConfig();
   const url = cfg.nftUrlTemplate.replaceAll("{address}", owner);
   const headers: Record<string, string> = { accept: "application/json" };
   const out: NftAsset[] = [];
