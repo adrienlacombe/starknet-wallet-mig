@@ -56,6 +56,13 @@ type DeployFund =
   | { status: "funded"; hash: string }
   | { status: "error"; error: string };
 
+type DeployTx =
+  | { status: "idle" }
+  | { status: "deploying" }
+  | { status: "submitted"; hash: string }
+  | { status: "deployed"; hash?: string }
+  | { status: "error"; error: string };
+
 interface TxState {
   hash: string;
   status: "submitted" | "confirmed" | "reverted" | "error";
@@ -107,6 +114,7 @@ export default function App() {
   const [proof, setProof] = useState<ProofState>({ status: "none" });
   const [receiverUndeployed, setReceiverUndeployed] = useState(false);
   const [deployFund, setDeployFund] = useState<DeployFund>({ status: "idle" });
+  const [deployTx, setDeployTx] = useState<DeployTx>({ status: "idle" });
   const [fundAmount, setFundAmount] = useState("2");
 
   // Assets
@@ -283,6 +291,57 @@ export default function App() {
       setDeployFund({
         status: "error",
         error: e?.message ?? "Funding transaction failed or was rejected.",
+      });
+    }
+  }
+
+  // Deploy the receiving account from ITS OWN wallet. A Starknet wallet deploys
+  // a counterfactual account automatically on its first transaction, so we
+  // trigger a harmless 0-value self-transfer; the wallet prepends the deploy and
+  // pays with the STRK funded above.
+  async function handleDeployReceiver() {
+    if (!recipient) return;
+    setDeployTx({ status: "deploying" });
+    try {
+      const w = await connectWallet("alwaysAsk");
+      if (!w) {
+        setDeployTx({ status: "idle" });
+        return;
+      }
+      if (!addressesEqual(w.address, recipient)) {
+        setDeployTx({
+          status: "error",
+          error: `Select the receiving account ${shortenAddress(recipient)} in your wallet, then try again (currently active: ${shortenAddress(w.address)}).`,
+        });
+        return;
+      }
+      const provider = makeProvider();
+      if (await isDeployed(provider, recipient)) {
+        setReceiverUndeployed(false);
+        setDeployTx({ status: "deployed" });
+        return;
+      }
+      const call = erc20TransferCall(STRK.address, recipient, 0n);
+      const res = await w.account.execute(call);
+      setDeployTx({ status: "submitted", hash: res.transaction_hash });
+      await provider.waitForTransaction(res.transaction_hash);
+      const nowDeployed = await isDeployed(provider, recipient);
+      setReceiverUndeployed(!nowDeployed);
+      setDeployTx(
+        nowDeployed
+          ? { status: "deployed", hash: res.transaction_hash }
+          : {
+              status: "error",
+              error:
+                "Transaction confirmed but the account still reads as undeployed. Check your wallet — it may not auto-deploy on a dapp transaction; deploy it from the wallet's own UI instead.",
+            },
+      );
+    } catch (e: any) {
+      setDeployTx({
+        status: "error",
+        error:
+          e?.message ??
+          "Deployment failed or was rejected. Make sure the account has a little STRK for the fee.",
       });
     }
   }
@@ -537,6 +596,7 @@ export default function App() {
                   setProof({ status: "none" });
                   setReceiverUndeployed(false);
                   setDeployFund({ status: "idle" });
+                  setDeployTx({ status: "idle" });
                 }}
                 placeholder="0x…"
                 spellCheck={false}
@@ -588,62 +648,110 @@ export default function App() {
                   <strong>Activate the receiving account</strong>
                   <p className="muted">
                     You can <em>skip this and migrate anyway</em> — transfers to an
-                    undeployed address succeed, and the STRK/ETH you send will let
-                    you deploy the wallet afterward. Or fund its deployment now from
-                    the <strong>sending</strong> wallet:
+                    undeployed address succeed. Or activate it now: fund the gas
+                    from the <strong>sending</strong> wallet, then deploy from the{" "}
+                    <strong>receiving</strong> wallet (only it can sign its own
+                    deployment).
                   </p>
-                  <ol className="muted small">
-                    <li>
-                      Send a little STRK from the sending wallet (covers the deploy
-                      fee).
-                    </li>
-                    <li>
-                      Open the <strong>receiving</strong> wallet and make any
-                      transaction — it deploys itself automatically, paying with that
-                      STRK. (Only the receiver’s wallet can sign its own deployment.)
-                    </li>
-                    <li>Come back and click “Connect receiver &amp; sign” again.</li>
-                  </ol>
-                  <div className="inline">
-                    <input
-                      className="short"
-                      value={fundAmount}
-                      onChange={(e) => setFundAmount(e.target.value)}
-                      spellCheck={false}
-                    />
-                    <span className="muted small" style={{ alignSelf: "center" }}>
-                      STRK
-                    </span>
-                    <button
-                      className="btn ghost"
-                      onClick={handleFundDeploy}
-                      disabled={deployFund.status === "funding"}
-                    >
-                      {deployFund.status === "funding"
-                        ? "Sending…"
-                        : "Fund deployment from sending wallet"}
-                    </button>
+
+                  <div className="deploy-step">
+                    <span className="step-pill">1</span>
+                    <div className="deploy-step-body">
+                      <div className="inline">
+                        <input
+                          className="short"
+                          value={fundAmount}
+                          onChange={(e) => setFundAmount(e.target.value)}
+                          spellCheck={false}
+                        />
+                        <span className="muted small" style={{ alignSelf: "center" }}>
+                          STRK
+                        </span>
+                        <button
+                          className="btn ghost"
+                          onClick={handleFundDeploy}
+                          disabled={deployFund.status === "funding"}
+                        >
+                          {deployFund.status === "funding"
+                            ? "Sending…"
+                            : "Fund gas from sending wallet"}
+                        </button>
+                      </div>
+                      {(deployFund.status === "submitted" ||
+                        deployFund.status === "funded") && (
+                        <p className="muted small">
+                          {deployFund.status === "funded"
+                            ? "✓ Gas sent. "
+                            : "Sent, confirming… "}
+                          <a
+                            href={EXPLORER_TX(deployFund.hash)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {shortenAddress(deployFund.hash, 10, 8)}
+                          </a>
+                        </p>
+                      )}
+                      {deployFund.status === "error" && (
+                        <p className="error">{deployFund.error}</p>
+                      )}
+                    </div>
                   </div>
-                  {(deployFund.status === "submitted" ||
-                    deployFund.status === "funded") && (
-                    <p className="muted small">
-                      {deployFund.status === "funded"
-                        ? "✓ Gas sent. "
-                        : "Sent, confirming… "}
-                      <a
-                        href={EXPLORER_TX(deployFund.hash)}
-                        target="_blank"
-                        rel="noreferrer"
+
+                  <div className="deploy-step">
+                    <span className="step-pill">2</span>
+                    <div className="deploy-step-body">
+                      <button
+                        className="btn ghost"
+                        onClick={handleDeployReceiver}
+                        disabled={
+                          deployTx.status === "deploying" ||
+                          deployTx.status === "deployed"
+                        }
                       >
-                        {shortenAddress(deployFund.hash, 10, 8)}
-                      </a>
-                      {deployFund.status === "funded" &&
-                        " — now activate the receiving wallet, then verify again."}
-                    </p>
-                  )}
-                  {deployFund.status === "error" && (
-                    <p className="error">{deployFund.error}</p>
-                  )}
+                        {deployTx.status === "deploying"
+                          ? "Deploying…"
+                          : "Deploy from receiving wallet"}
+                      </button>
+                      <span className="muted small">
+                        {" "}
+                        switches your wallet to the receiving account
+                      </span>
+                      {deployTx.status === "submitted" && (
+                        <p className="muted small">
+                          Deploying, confirming…{" "}
+                          <a
+                            href={EXPLORER_TX(deployTx.hash)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {shortenAddress(deployTx.hash, 10, 8)}
+                          </a>
+                        </p>
+                      )}
+                      {deployTx.status === "deployed" && (
+                        <p className="muted small">
+                          ✓ Account deployed
+                          {deployTx.hash ? (
+                            <>
+                              {" "}
+                              <a
+                                href={EXPLORER_TX(deployTx.hash)}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {shortenAddress(deployTx.hash, 10, 8)}
+                              </a>
+                            </>
+                          ) : null}{" "}
+                          — click “Connect receiver &amp; sign” above to verify.
+                        </p>
+                      )}
+                      {deployTx.status === "error" && (
+                        <p className="error">{deployTx.error}</p>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
