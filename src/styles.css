@@ -253,6 +253,9 @@ input.short {
 .muted {
   color: var(--muted);
 }
+.warn-text {
+  color: var(--warn);
+}
 .small {
   font-size: 12px;
 }

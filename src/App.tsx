@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Settings } from "./components/Settings";
 import {
   CHAIN_LABEL,
@@ -111,7 +111,37 @@ export default function App() {
     () => normalizeAddress(recipientInput),
     [recipientInput],
   );
+
+  // As soon as a valid recipient is entered, check on-chain whether its account
+  // is deployed (debounced). If not, the activation panel appears proactively.
+  useEffect(() => {
+    if (!recipient) {
+      setRecipientStatus("idle");
+      setReceiverUndeployed(false);
+      return;
+    }
+    let cancelled = false;
+    setRecipientStatus("checking");
+    const timer = setTimeout(async () => {
+      try {
+        const deployed = await isDeployed(makeProvider(), recipient);
+        if (cancelled) return;
+        setRecipientStatus(deployed ? "deployed" : "undeployed");
+        setReceiverUndeployed(!deployed);
+      } catch {
+        if (cancelled) return;
+        setRecipientStatus("error");
+      }
+    }, 450);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [recipient]);
   const [proof, setProof] = useState<ProofState>({ status: "none" });
+  const [recipientStatus, setRecipientStatus] = useState<
+    "idle" | "checking" | "deployed" | "undeployed" | "error"
+  >("idle");
   const [receiverUndeployed, setReceiverUndeployed] = useState(false);
   const [deployFund, setDeployFund] = useState<DeployFund>({ status: "idle" });
   const [deployTx, setDeployTx] = useState<DeployTx>({ status: "idle" });
@@ -606,6 +636,23 @@ export default function App() {
               )}
               {recipient && (
                 <small className="muted">Parsed: {recipient}</small>
+              )}
+              {recipient && recipientStatus === "checking" && (
+                <small className="muted">Checking deployment status…</small>
+              )}
+              {recipient && recipientStatus === "deployed" && (
+                <small className="muted">✓ Account is deployed on-chain.</small>
+              )}
+              {recipient && recipientStatus === "undeployed" && (
+                <small className="warn-text">
+                  ⚠ This account isn’t deployed on-chain yet — activation options
+                  are below.
+                </small>
+              )}
+              {recipient && recipientStatus === "error" && (
+                <small className="muted">
+                  Couldn’t check deployment status (RPC) — you can still proceed.
+                </small>
               )}
               {recipient && sender && addressesEqual(recipient, sender.address) && (
                 <small className="error">
