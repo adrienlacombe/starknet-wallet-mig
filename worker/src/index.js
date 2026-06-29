@@ -100,8 +100,16 @@ export default {
           });
           if (!r.ok) {
             const body = await r.text().catch(() => "");
+            let hint;
+            if (r.status === 401)
+              hint =
+                "Starkscan rejected the API key (401). The STARKSCAN_API_KEY secret is missing, wrong, or revoked — re-run `wrangler secret put STARKSCAN_API_KEY` with a valid key.";
+            else if (r.status === 403)
+              hint = "Starkscan returned 403 — the key may lack access for this route/chain.";
+            else if (r.status === 429)
+              hint = "Starkscan rate limit (429) — slow down or upgrade the key.";
             return json(
-              { error: `starkscan ${r.status}`, detail: body.slice(0, 200) },
+              { error: `starkscan ${r.status}`, hint, detail: body.slice(0, 200) },
               502,
               origin,
               env,
